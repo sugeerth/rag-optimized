@@ -1,0 +1,8 @@
+# Deps for the LoRA fine-tuning demo (lora_demo.py).
+# Install into a venv:  python3 -m venv .venv-lora && ./.venv-lora/bin/pip install -r requirements-lora.txt
+# Then run:             ./.venv-lora/bin/python lora_demo.py
+torch>=2.2
+transformers>=4.44
+peft>=0.12
+accelerate>=0.33
+matplotlib>=3.7

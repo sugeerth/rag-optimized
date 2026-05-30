@@ -36,6 +36,16 @@ uvicorn server:app --reload
 
 ---
 
+## 🧬 LoRA Lab — live fine-tuning on your upload
+
+Open the **LoRA Lab** tab, upload a `.pdf`/`.txt`/`.md` (or paste text), and hit **Fine-tune with LoRA**. The server runs a **real but tiny LoRA**: a frozen base model plus trainable low-rank adapters (`A @ B`), trained with hand-written gradients in **pure NumPy** — so it fits Render's free tier (512MB / 0.1 CPU) and finishes in well under a second. You get a live loss curve plus **before/after** samples.
+
+Because the base model is intentionally small (char-level), the generated text is rough — the point is to *see LoRA actually train* (loss drops, "after" text picks up your document's style) on a free hosted box. It's all in **`lora_live.py`**, fully commented and easy to tweak (`D`, `R`, `STEPS`, `LR` at the top). Endpoints: `POST /lora/finetune` (JSON text) and `POST /lora/finetune_file` (file upload).
+
+> Want real pretrained-model LoRA (PyTorch + PEFT) instead? See `lora_demo.py` + `requirements-lora.txt` — it fine-tunes Qwen2.5-0.5B locally (Apple Silicon/MPS, CUDA, or CPU). That needs ~2GB RAM, so it runs on your machine, not the free cloud tier.
+
+---
+
 ## Project map
 
 Everything is plain Python and easy to tweak. Here's where each piece lives:

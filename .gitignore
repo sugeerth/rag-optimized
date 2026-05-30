@@ -11,3 +11,7 @@ traces/
 *.log
 .DS_Store
 .claude/
+
+# LoRA training outputs (build artifacts)
+lora_out/
+.venv-lora/

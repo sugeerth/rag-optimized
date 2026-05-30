@@ -42,6 +42,12 @@ class EvalRequest(BaseModel):
     test_cases: list[dict]
 
 
+class LoraRequest(BaseModel):
+    text: str
+    steps: int = 300
+    seed_prompt: str | None = None
+
+
 # --- Core Endpoints ---
 
 @app.post("/query")
@@ -103,6 +109,41 @@ async def handle_upload(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(400, "No readable text found (scanned/image-only PDFs aren't supported).")
     return _ingest(safe_name, text)
+
+
+# --- LoRA Lab: live fine-tuning on uploaded text (pure NumPy, fits free tier) ---
+
+@app.post("/lora/finetune")
+async def handle_lora(req: LoraRequest):
+    """Run a real (tiny) LoRA fine-tune on the supplied text and return loss +
+    before/after samples. Pure NumPy so it works on free-tier Render."""
+    import asyncio
+    import lora_live  # light: only needs numpy
+    steps = max(20, min(req.steps, 1000))  # clamp so a request can't hog the CPU
+    try:
+        # Training is CPU-bound; run it off the event loop so the server stays responsive.
+        return await asyncio.to_thread(
+            lora_live.finetune_on_text, req.text, steps=steps, seed_prompt=req.seed_prompt
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/lora/finetune_file")
+async def handle_lora_file(file: UploadFile = File(...), steps: int = 300):
+    """Upload a .pdf/.txt/.md and LoRA-fine-tune on its text in one shot."""
+    import asyncio
+    import lora_live
+    safe_name = re.sub(r"[^\w\-.]", "_", file.filename or "upload.txt")
+    content = await file.read()
+    text = _extract_text(safe_name, content)
+    steps = max(20, min(steps, 1000))
+    try:
+        result = await asyncio.to_thread(lora_live.finetune_on_text, text, steps=steps)
+        result["doc_name"] = safe_name
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 # --- Evaluation Endpoints ---

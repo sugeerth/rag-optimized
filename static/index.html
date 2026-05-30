@@ -377,6 +377,7 @@
 <div class="tabs">
   <button class="tab active" data-panel="query">Query</button>
   <button class="tab" data-panel="ingest">Ingest Documents</button>
+  <button class="tab" data-panel="lora">LoRA Lab</button>
   <button class="tab" data-panel="traces">Traces</button>
   <button class="tab" data-panel="metrics">Metrics</button>
   <button class="tab" data-panel="guardrails">Guardrails</button>
@@ -505,6 +506,59 @@
     <div class="card">
       <h3>Ingestion Log</h3>
       <div id="ingestLog" style="font-size:13px;color:var(--text2)">No documents ingested yet.</div>
+    </div>
+  </div>
+
+  <!-- ===== LORA LAB PANEL ===== -->
+  <div class="panel" id="panel-lora">
+    <div class="card">
+      <h3>&#129516; LoRA Lab &mdash; fine-tune live on your upload</h3>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6">
+        Runs a real but tiny LoRA (frozen base + low-rank adapters) in pure NumPy on the server &mdash;
+        small model, so generated text is rough; watch the loss curve drop and the AFTER text pick up
+        your document's style.
+      </div>
+      <div class="two-col">
+        <div>
+          <label>Upload a document to fine-tune on</label>
+          <div class="drop-zone" id="loraDropZone" onclick="document.getElementById('loraFileInput').click()">
+            <p>Drop a .pdf, .txt, or .md file here, or click to browse</p>
+            <input type="file" id="loraFileInput" accept=".pdf,.txt,.md,.text" style="display:none" onchange="runLoraFile(event)">
+          </div>
+        </div>
+        <div>
+          <label>&hellip; or paste / edit text directly</label>
+          <textarea id="loraText" rows="8" placeholder="Paste the text you want the LoRA to learn..."></textarea>
+        </div>
+      </div>
+      <div class="btn-row">
+        <label style="margin:0">Steps</label>
+        <input type="number" id="loraSteps" value="300" min="20" max="1000" style="width:90px">
+        <button class="btn btn-primary" id="loraBtn" onclick="runLora()">Fine-tune with LoRA</button>
+        <span id="loraStatus" style="font-size:13px;color:var(--text2)"></span>
+      </div>
+    </div>
+
+    <!-- LoRA results -->
+    <div class="card hidden" id="loraResultCard">
+      <div id="loraHeader" style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6"></div>
+      <div style="margin-bottom:20px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0">Loss curve</h3>
+          <span id="loraLossLabel" style="font-size:12px;color:var(--text2);font-family:monospace"></span>
+        </div>
+        <div id="loraLossChart"></div>
+      </div>
+      <div class="two-col">
+        <div>
+          <label>BEFORE LoRA</label>
+          <div class="answer-box" id="loraBefore" style="font-family:monospace;font-size:12px;white-space:pre-wrap"></div>
+        </div>
+        <div>
+          <label>AFTER LoRA</label>
+          <div class="answer-box" id="loraAfter" style="font-family:monospace;font-size:12px;white-space:pre-wrap"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -924,6 +978,105 @@ dropZone.addEventListener('drop', e => {
   if (e.dataTransfer.files.length) {
     document.getElementById('fileInput').files = e.dataTransfer.files;
     handleFileSelect({ target: { files: e.dataTransfer.files } });
+  }
+});
+
+// --- LoRA Lab ---
+async function runLora() {
+  const text = document.getElementById('loraText').value.trim();
+  if (!text) { alert('Please paste some text, or upload a file.'); return; }
+  const steps = parseInt(document.getElementById('loraSteps').value, 10) || 300;
+  const btn = document.getElementById('loraBtn');
+  const status = document.getElementById('loraStatus');
+  btn.disabled = true;
+  status.innerHTML = 'Fine-tuning&hellip; (training a real LoRA on the server)';
+  try {
+    const res = await fetch(BASE + '/lora/finetune', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text, steps, seed_prompt: null })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Fine-tune failed');
+    renderLora(data);
+    status.innerHTML = '';
+  } catch (err) {
+    status.innerHTML = `<span class="tag tag-red">Error: ${err.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runLoraFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const steps = parseInt(document.getElementById('loraSteps').value, 10) || 300;
+  const btn = document.getElementById('loraBtn');
+  const status = document.getElementById('loraStatus');
+  btn.disabled = true;
+  status.innerHTML = 'Fine-tuning&hellip; (training a real LoRA on the server)';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(BASE + '/lora/finetune_file?steps=' + steps, {
+      method: 'POST',
+      body: formData
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Fine-tune failed');
+    renderLora(data);
+    status.innerHTML = '';
+  } catch (err) {
+    status.innerHTML = `<span class="tag tag-red">Error: ${err.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderLora(data) {
+  document.getElementById('loraResultCard').classList.remove('hidden');
+  const p = data.params || {};
+  document.getElementById('loraHeader').innerHTML =
+    `<strong>${escHtml(data.model || '')}</strong> on <span class="tag tag-blue">${escHtml(data.device || '')}</span> &mdash; ` +
+    `${data.chars} chars, vocab ${data.vocab}, ${data.steps} steps &mdash; ` +
+    `training ${p.trainable} / ${p.total} params (${p.pct}%)`;
+
+  const hist = data.loss_history || [];
+  document.getElementById('loraLossChart').innerHTML = renderLoss(hist);
+  document.getElementById('loraLossLabel').textContent =
+    `loss ${(data.loss_start ?? hist[0] ?? 0).toFixed(2)} -> ${(data.loss_end ?? hist[hist.length - 1] ?? 0).toFixed(2)}`;
+
+  document.getElementById('loraBefore').textContent = data.before || '';
+  document.getElementById('loraAfter').textContent = data.after || '';
+}
+
+function renderLoss(arr) {
+  const W = 320, H = 120, pad = 8;
+  if (!arr || arr.length === 0) return '';
+  const min = Math.min(...arr), max = Math.max(...arr);
+  const range = (max - min) || 1;
+  const n = arr.length;
+  const x = i => pad + (n === 1 ? 0 : (i / (n - 1)) * (W - 2 * pad));
+  const y = v => pad + (1 - (v - min) / range) * (H - 2 * pad);
+  const points = arr.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  // baseline at the final (lowest) loss level
+  const baseY = y(arr[arr.length - 1]).toFixed(1);
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="background:var(--surface2);border-radius:8px">
+    <line x1="${pad}" y1="${baseY}" x2="${W - pad}" y2="${baseY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,3" />
+    <polyline points="${points}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+  </svg>`;
+}
+
+// LoRA drag and drop
+const loraDropZone = document.getElementById('loraDropZone');
+loraDropZone.addEventListener('dragover', e => { e.preventDefault(); loraDropZone.classList.add('dragover'); });
+loraDropZone.addEventListener('dragleave', () => loraDropZone.classList.remove('dragover'));
+loraDropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  loraDropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) {
+    document.getElementById('loraFileInput').files = e.dataTransfer.files;
+    runLoraFile({ target: { files: e.dataTransfer.files } });
   }
 });
 
