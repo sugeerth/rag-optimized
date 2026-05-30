@@ -1,0 +1,39 @@
+# Smoke-tests every push: installs ONLY the slim deps, boots the app, and hits
+# the demo endpoint — so a broken build is caught here before Render deploys it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install slim deps
+        run: pip install -r requirements.txt
+
+      - name: App imports with no heavy deps
+        run: |
+          python -c "import server; print('import OK')"
+          python -c "import torch" 2>/dev/null && (echo 'ERROR: torch leaked into slim build' && exit 1) || echo 'no torch (correct)'
+
+      - name: Boot server and hit demo endpoint
+        run: |
+          uvicorn server:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          echo "--- /health ---";       curl -sf http://127.0.0.1:8000/health
+          echo "--- / (UI) ---";        curl -sf -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/
+          echo "--- /demo/query ---";   curl -sf -X POST http://127.0.0.1:8000/demo/query \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"What is RAG?"}' | head -c 200

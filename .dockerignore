@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.git/
+.github/
+chroma_db/
+traces/
+.env
+.venv/
+venv/
+.DS_Store
+.claude/
+*.log
