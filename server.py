@@ -53,24 +53,56 @@ async def handle_query(req: QueryRequest):
     return await pipeline.query(req.query, enable_eval=req.evaluate)
 
 
+def _ingest(doc_name: str, text: str) -> dict:
+    """Ingest text, turning the 'heavy deps missing' case into a clear message.
+
+    The live slim demo has no embedding model, so indexing can't run there —
+    we return a friendly 503 instead of a generic 500. Full mode just works.
+    """
+    import pipeline  # lazy: heavy ML deps, see top-of-file note
+    try:
+        return pipeline.ingest_document(doc_name, text)
+    except RuntimeError as exc:
+        raise HTTPException(503, f"Indexing needs full mode (pip install -r requirements-full.txt). Detail: {exc}")
+
+
 @app.post("/ingest")
 async def handle_ingest(req: IngestRequest):
     """Ingest a document (JSON body with doc_name and content)."""
     if not req.content.strip():
         raise HTTPException(400, "Content cannot be empty")
-    import pipeline  # lazy: heavy ML deps, see top-of-file note
-    return pipeline.ingest_document(req.doc_name, req.content)
+    return _ingest(req.doc_name, req.content)
+
+
+def _extract_text(filename: str, raw: bytes) -> str:
+    """Pull plain text out of an uploaded file. Supports .pdf, .txt, .md.
+
+    PDFs are binary, so we extract their text with pypdf instead of decoding
+    them as utf-8 (which is what used to crash uploads). Add new file types here.
+    """
+    is_pdf = filename.lower().endswith(".pdf") or raw[:5] == b"%PDF-"
+    if is_pdf:
+        try:
+            from pypdf import PdfReader  # light dep, in requirements.txt
+        except ImportError:
+            raise HTTPException(500, "PDF support needs pypdf — run: pip install pypdf")
+        import io
+        reader = PdfReader(io.BytesIO(raw))
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    # Plain text / markdown — tolerate stray bytes instead of 500-ing.
+    return raw.decode("utf-8", errors="replace")
 
 
 @app.post("/upload")
 async def handle_upload(file: UploadFile = File(...)):
-    """Upload and ingest a text/markdown file."""
+    """Upload and ingest a .pdf, .txt, or .md file."""
     # Sanitize filename to prevent path traversal
     safe_name = re.sub(r"[^\w\-.]", "_", file.filename or "upload.txt")
     content = await file.read()
-    text = content.decode("utf-8")
-    import pipeline  # lazy: heavy ML deps, see top-of-file note
-    return pipeline.ingest_document(safe_name, text)
+    text = _extract_text(safe_name, content)
+    if not text.strip():
+        raise HTTPException(400, "No readable text found (scanned/image-only PDFs aren't supported).")
+    return _ingest(safe_name, text)
 
 
 # --- Evaluation Endpoints ---
