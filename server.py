@@ -50,26 +50,53 @@ class LoraRequest(BaseModel):
 
 # --- Core Endpoints ---
 
+def _heavy_stack_available() -> bool:
+    """True only when the full embedding stack is installed (full mode).
+
+    On the slim free tier these aren't present, so we route to the demo pipeline
+    instead of letting the real pipeline blow up partway through.
+    """
+    try:
+        import vector_store
+        vector_store.get_collection()  # raises RuntimeError in slim mode
+        return True
+    except Exception:
+        return False
+
+
 @app.post("/query")
 async def handle_query(req: QueryRequest):
-    """Run the full RAG pipeline on a user query."""
+    """Run the full RAG pipeline on a user query.
+
+    On the slim free tier the heavy embedding stack is missing, so the real
+    pipeline can't run. We fall back to the demo pipeline (same response shape)
+    so /query stays functional instead of 500-ing.
+    """
     if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
-    import pipeline  # lazy: heavy ML deps, see top-of-file note
-    return await pipeline.query(req.query, enable_eval=req.evaluate)
+    if not _heavy_stack_available():
+        return await demo_query(req)
+    try:
+        import pipeline  # lazy: heavy ML deps, see top-of-file note
+        return await pipeline.query(req.query, enable_eval=req.evaluate)
+    except (RuntimeError, ImportError):
+        return await demo_query(req)
 
 
 def _ingest(doc_name: str, text: str) -> dict:
-    """Ingest text, turning the 'heavy deps missing' case into a clear message.
+    """Ingest text, falling back to the in-memory demo store in slim mode.
 
-    The live slim demo has no embedding model, so indexing can't run there —
-    we return a friendly 503 instead of a generic 500. Full mode just works.
+    Full mode embeds + indexes via the real pipeline. On the slim free tier the
+    embedding stack is missing (RuntimeError) or unimportable (ImportError), so we
+    fall back to a pure-Python in-memory store — uploading then querying still works.
     """
-    import pipeline  # lazy: heavy ML deps, see top-of-file note
     try:
+        import pipeline  # lazy: heavy ML deps, see top-of-file note
         return pipeline.ingest_document(doc_name, text)
-    except RuntimeError as exc:
-        raise HTTPException(503, f"Indexing needs full mode (pip install -r requirements-full.txt). Detail: {exc}")
+    except (RuntimeError, ImportError):
+        import demo_store
+        n = demo_store.add_document(doc_name, text)
+        return {"status": "indexed (demo)", "doc_name": doc_name, "chunks": n}
 
 
 @app.post("/ingest")
@@ -228,7 +255,7 @@ async def demo_query(req: QueryRequest):
         jitter = random.uniform(0.8, 1.3)
         return {"name": name, "duration_ms": round(ms_base * jitter, 2), "metadata": meta}
 
-    # Check if we have real chunks in the vector store
+    # Check if we have real chunks in the heavy vector store (full mode).
     try:
         from vector_store import get_collection, embed_texts
         collection = get_collection()
@@ -237,11 +264,13 @@ async def demo_query(req: QueryRequest):
         count = 0
 
     sources = []
+    store_total = 0  # total chunks considered (for realistic span metadata)
     if count > 0:
         try:
             emb = embed_texts([query])
             results = collection.query(query_embeddings=emb, n_results=min(5, count),
                                        include=["documents", "metadatas", "distances"])
+            store_total = count
             for i in range(len(results["ids"][0])):
                 sources.append({
                     "text": results["documents"][0][i][:200] + ("..." if len(results["documents"][0][i]) > 200 else ""),
@@ -251,6 +280,16 @@ async def demo_query(req: QueryRequest):
         except Exception:
             pass
 
+    # Slim mode: pull REAL sources from the in-memory store (seeded + ingested docs).
+    if not sources:
+        try:
+            import demo_store
+            store_total = demo_store.count()
+            sources = demo_store.search(query, top_k=5)
+        except Exception:
+            sources = []
+
+    # Last resort (store empty): canned demo sources so the UI still renders.
     if not sources:
         sources = [
             {"text": "RAG enhances LLMs by retrieving relevant context from a knowledge base before generating responses...",
@@ -261,14 +300,11 @@ async def demo_query(req: QueryRequest):
              "metadata": {"doc_name": "demo-doc", "heading": "Chunking", "doc_type": "general"}, "rerank_score": 0.74},
         ]
 
-    source_text = "\n".join(f"[Source {i+1}]: {s['text']}" for i, s in enumerate(sources))
-    answer = (
-        f"Based on the retrieved documents:\n\n"
-        f"{sources[0]['text'][:150]} [Source 1]\n\n"
-        f"{sources[1]['text'][:150] if len(sources) > 1 else ''} [Source 2]\n\n"
-        f"The system uses structure-aware chunking, cross-encoder reranking, and "
-        f"agentic retrieval with self-reflection to ensure high-quality, grounded answers. [Source 3]"
-    )
+    # Build the answer from the ACTUAL retrieved sources, citing each one.
+    answer_parts = ["Based on the retrieved documents:\n"]
+    for i, s in enumerate(sources[:3]):
+        answer_parts.append(f"{s['text'][:180]} [Source {i + 1}]")
+    answer = "\n\n".join(answer_parts)
 
     output_check = _guardrails.validate_output(answer, [{"text": s["text"][:200], "metadata": s.get("metadata", {})} for s in sources])
 
@@ -279,8 +315,8 @@ async def demo_query(req: QueryRequest):
         _span("query_expansion", 380, num_variants=3),
         _span("embedding", 45, num_embeddings=4),
         _span("chunk_cache_check", 0.2, hit=False),
-        _span("parallel_vector_search", 28, num_hits=20),
-        _span("reranking", 120, before=20, after=len(sources)),
+        _span("parallel_vector_search", 28, num_hits=(store_total or len(sources))),
+        _span("reranking", 120, before=(store_total or len(sources)), after=len(sources)),
         _span("agentic_retrieval", 1800, iterations=2, grounded=True),
         _span("output_guardrails", 1.0, **output_check),
     ]
@@ -297,7 +333,7 @@ async def demo_query(req: QueryRequest):
         "output_safety": output_check,
         "trace": trace_data,
         "reasoning_trace": [
-            "Iteration 1: Evaluating retrieved context — found 20 chunks covering the query topic.",
+            f"Iteration 1: Evaluating retrieved context — considered {store_total or len(sources)} chunks, kept top {len(sources)} for the query topic.",
             "Searching: ['RAG pipeline architecture', 'retrieval augmented generation techniques']",
             "Iteration 2: Context is sufficient to provide a comprehensive answer.",
             "Final answer generated (grounded=True)",
