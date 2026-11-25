@@ -6,7 +6,7 @@ An observable, optimized RAG pipeline with a web UI. With no API key, no GPU and
 | --- | --- |
 | Retrieval, 2,000 docs / 16,000 chunks | recall@5 **99.5%**, MRR 0.97 (`python bench.py`) |
 | Uncached pipeline latency, one core | p50 **2.1 ms**, p99 4.0 ms |
-| 1-hour soak | SOAK_HEADLINE |
+| 1-hour soak | **2,254,787 requests, 0 errors**, p50 11.4 ms / p99 32.7 ms at the client, throughput flat start to finish ([report](reports/soak-1h/report.md)) |
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sugeerth/rag-optimized)
 
@@ -83,7 +83,22 @@ python soak.py --duration 60       # quick version
 
 Eight closed-loop clients ask checked questions while another thread re-ingests documents (cache invalidation, tombstones, index compaction) and a third kicks off LoRA fine-tunes. Prompt-injection and PII queries must be blocked and off-topic questions must be declined; the run exits non-zero on any error. It writes `report.html` (charts), `report.md`, `summary.json` and `timeseries.jsonl`.
 
-SOAK_SECTION
+**The recorded 1-hour run** ([`reports/soak-1h/`](reports/soak-1h/report.md), charts in `report.html`), one uvicorn worker on a 4-CPU box:
+
+| | Baseline run | After the compaction fix |
+| --- | --- | --- |
+| Requests served | 1,908,763 | **2,254,787** |
+| Errors / failed safety checks | 0 / 0 | **0 / 0** |
+| Average throughput | 530 req/s | **626 req/s** |
+| Throughput, first 10% vs last 10% | 587 to 426 (-27%) | **601 to 628 (+4.5%)** |
+| Latency p50 / p99 (client side) | 13.5 / 39.1 ms | **11.4 / 32.7 ms** |
+| Worst single request | 2,224 ms | **256 ms** |
+| Recall@5 / answer accuracy | 99.2% / 81.9% | **99.5% / 82.3%** |
+| Server memory, start to end | 188 to 301 MB | 188 to 276 MB |
+
+The first run ([`reports/soak-1h-baseline/`](reports/soak-1h-baseline/report.md)) is kept because it is why the soak exists: it passed every correctness check but showed throughput sagging as deleted chunks piled up in the index, and one 2.2-second stall when they were finally cleaned out. Compaction was rewritten to remap ids in place (about 55 ms) and run at 5% dead chunks, and the second run is flat.
+
+Still open: memory grew 88 MB over the hour in the second run, slowing but not flat by the end. Roughly 30 MB of that is the one-hour `/stats` window filling up, which is bounded; the rest has not been tracked down, so a multi-hour run is the next thing to try.
 
 ### Watch it
 
