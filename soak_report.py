@@ -29,7 +29,8 @@ main{max-width:1080px;margin:0 auto;padding:32px 16px 64px}
 h1{font-size:28px;margin:0 0 4px;letter-spacing:-.01em}h2{font-size:17px;margin:36px 0 12px}
 .sub{color:var(--text2);margin:0 0 24px}
 .verdict{display:inline-flex;gap:8px;align-items:center;font-weight:600;padding:6px 12px;border-radius:999px;border:1px solid var(--border);background:var(--surface);margin-bottom:20px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media (max-width:640px){.tiles{grid-template-columns:repeat(2,1fr)}}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
 .tile b{display:block;font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .tile span{color:var(--text2);font-size:13px}
@@ -66,13 +67,14 @@ function draw(host, [title, sub, series, unit]) {
   const W = 520, H = 190, L = 44, R = 12, T = 8, B = 22, cols = ["var(--s1)", "var(--s2)"];
   const xs = ROWS.map(r => r.t), tmax = xs[xs.length - 1] || 1;
   let ymax = Math.max(...series.flatMap(([k]) => ROWS.map(r => r[k] ?? 0)));
-  ymax = unit === "%" ? 1 : (ymax || 1) * 1.12;
+  if (unit === "%") ymax = 1;
+  else { const raw = (ymax || 1) * 1.1 / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), step = [1, 2, 2.5, 5, 10].find(m => m * mag >= raw) * mag; ymax = step * 4; }  // round tick values
   const X = t => L + (t / tmax) * (W - L - R), Y = v => T + (1 - v / ymax) * (H - T - B);
   let g = "";
   for (let i = 0; i <= 4; i++) { const v = ymax * i / 4, y = Y(v);
     g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${fmt(v, unit === "%" ? "%" : "").replace(".0%", "%")}</text>`; }
   for (let i = 0; i <= 4; i++) { const t = tmax * i / 4;
-    g += `<text x="${X(t)}" y="${H - 5}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${Math.round(t / 60)} min</text>`; }
+    g += `<text x="${X(t)}" y="${H - 5}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${tmax >= 600 ? Math.round(t / 60) + " min" : Math.round(t) + " s"}</text>`; }
   series.forEach(([k], si) => { let d = "", pen = false;
     ROWS.forEach(r => { if (r[k] == null) { pen = false; return; } d += (pen ? "L" : "M") + X(r.t).toFixed(1) + " " + Y(r[k]).toFixed(1); pen = true; });
     g += `<path d="${d}" fill="none" stroke="${cols[si]}" stroke-width="2" stroke-linejoin="round"/>`; });
