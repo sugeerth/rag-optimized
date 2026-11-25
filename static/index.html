@@ -397,6 +397,17 @@
     padding: 14px 16px;
     font-size: 13px; line-height: 1.7; color: var(--text2);
   }
+  /* Mission Control charts */
+  .live-chart { position: relative; }
+  .live-sub { font-size: 12px; color: var(--text2); margin-bottom: 8px; }
+  .live-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .live-chart svg text { fill: var(--text2); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .live-legend { display: flex; gap: 14px; font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+  .live-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
+  .live-tip { position: absolute; pointer-events: none; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; white-space: nowrap; display: none; z-index: 2; }
+  .score-chip { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text2); background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+  .tabs { overflow-x: auto; }
+  .tab { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -411,6 +422,7 @@
 
 <div class="tabs">
   <button class="tab active" data-panel="query">Query</button>
+  <button class="tab" data-panel="live">Mission Control</button>
   <button class="tab" data-panel="ingest">Ingest Documents</button>
   <button class="tab" data-panel="lora">LoRA Lab</button>
   <button class="tab" data-panel="traces">Traces</button>
@@ -445,7 +457,7 @@
         <div class="flow-arrow">&#8594;</div>
         <div class="flow-step"><div class="flow-icon" data-step="embed">&#129518;</div><div class="flow-label">Embed</div></div>
         <div class="flow-arrow">&#8594;</div>
-        <div class="flow-step"><div class="flow-icon" data-step="search">&#128451;</div><div class="flow-label">Vector Search</div></div>
+        <div class="flow-step"><div class="flow-icon" data-step="search">&#128451;</div><div class="flow-label">Hybrid Search</div></div>
         <div class="flow-arrow">&#8594;</div>
         <div class="flow-step"><div class="flow-icon" data-step="rerank">&#128200;</div><div class="flow-label">Rerank</div></div>
         <div class="flow-arrow">&#8594;</div>
@@ -514,6 +526,43 @@
           <div id="safetyContent"></div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ===== MISSION CONTROL (live stats) ===== -->
+  <div class="panel" id="panel-live">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+        <div>
+          <h3 style="margin-bottom:6px">Mission Control</h3>
+          <div style="font-size:13px;color:var(--text2);line-height:1.6;max-width:720px">Live numbers from this server, refreshed every second. Load a corpus with known answers, then fire a burst of questions from your browser and watch throughput, latency and the cache respond. Nothing here is simulated.</div>
+        </div>
+        <div class="btn-row" style="margin:0">
+          <button class="btn btn-secondary btn-sm" id="liveCorpusBtn" onclick="liveLoadCorpus()">Load 500-doc corpus</button>
+          <button class="btn btn-primary btn-sm" id="liveFireBtn" onclick="liveFire()">Fire 2,000 queries</button>
+          <button class="btn btn-secondary btn-sm" onclick="liveReset()">Reset index</button>
+        </div>
+      </div>
+      <div id="liveStatus" style="font-size:13px;color:var(--text2);margin-top:12px;min-height:18px"></div>
+    </div>
+    <div class="card-grid" style="grid-template-columns:repeat(auto-fit,minmax(138px,1fr))">
+      <div class="stat-box"><div class="stat-value" id="liveQps">-</div><div class="stat-label">Queries / sec (last 10s)</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveP50">-</div><div class="stat-label">p50 pipeline latency</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveP99">-</div><div class="stat-label">p99 pipeline latency</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveHit">-</div><div class="stat-label">Cache hit rate (last 10s)</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveTotal">-</div><div class="stat-label">Queries since boot</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveChunks">-</div><div class="stat-label">Chunks indexed</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveRss">-</div><div class="stat-label">Server memory</div></div>
+      <div class="stat-box"><div class="stat-value" id="liveUp">-</div><div class="stat-label">Uptime</div></div>
+    </div>
+    <div class="card-grid" style="margin-top:20px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
+      <div class="card live-chart" style="margin:0"><h3 style="margin-bottom:2px">Throughput</h3><div class="live-sub">queries per second, last 2 minutes</div><div id="liveChartQps"></div></div>
+      <div class="card live-chart" style="margin:0"><h3 style="margin-bottom:2px">Pipeline latency</h3><div class="live-sub">milliseconds, measured inside the server</div><div id="liveChartLat"></div></div>
+      <div class="card live-chart" style="margin:0"><h3 style="margin-bottom:2px">Cache hit rate</h3><div class="live-sub">share of queries answered from cache</div><div id="liveChartHit"></div></div>
+    </div>
+    <div class="card" style="margin-top:20px">
+      <h3>Proof it holds: the 1-hour soak</h3>
+      <div style="font-size:13px;color:var(--text2);line-height:1.7">Run <code style="color:var(--accent2)">python soak.py --duration 3600</code> to hammer the server for an hour with checked questions, re-ingests and LoRA fine-tunes running at once. The last recorded run is in <code style="color:var(--accent2)">reports/soak-1h/</code>.</div>
     </div>
   </div>
 
@@ -649,18 +698,18 @@
         <button class="btn btn-secondary btn-sm" onclick="loadMetrics()">Refresh</button>
       </div>
       <table class="metrics-table" id="metricsTable">
-        <thead><tr><th>Pipeline Step</th><th>Mean (ms)</th><th>P50 (ms)</th><th>P95 (ms)</th><th>Min (ms)</th><th>Max (ms)</th></tr></thead>
-        <tbody id="metricsBody"><tr><td colspan="6" style="color:var(--text2);text-align:center">No data yet</td></tr></tbody>
+        <thead><tr><th>Pipeline Step</th><th>Mean (ms)</th><th>P50 (ms)</th><th>P95 (ms)</th><th>P99 (ms)</th><th>Min (ms)</th><th>Max (ms)</th></tr></thead>
+        <tbody id="metricsBody"><tr><td colspan="7" style="color:var(--text2);text-align:center">No data yet</td></tr></tbody>
       </table>
     </div>
 
     <div class="card">
-      <h3>Cache Stats</h3>
+      <h3>Cache and Index</h3>
       <div class="card-grid" id="cacheStats">
-        <div class="stat-box"><div class="stat-value" id="userCacheSize">-</div><div class="stat-label">User Cache Entries</div></div>
-        <div class="stat-box"><div class="stat-value" id="userCacheMax">-</div><div class="stat-label">User Cache Max</div></div>
-        <div class="stat-box"><div class="stat-value" id="chunkCacheSize">-</div><div class="stat-label">Chunk Cache Entries</div></div>
-        <div class="stat-box"><div class="stat-value" id="chunkCacheMax">-</div><div class="stat-label">Chunk Cache Max</div></div>
+        <div class="stat-box"><div class="stat-value" id="userCacheSize">-</div><div class="stat-label">Cached Answers</div></div>
+        <div class="stat-box"><div class="stat-value" id="userCacheMax">-</div><div class="stat-label">Exact-Match Hits</div></div>
+        <div class="stat-box"><div class="stat-value" id="chunkCacheSize">-</div><div class="stat-label">Reworded-Query Hits</div></div>
+        <div class="stat-box"><div class="stat-value" id="chunkCacheMax">-</div><div class="stat-label">Chunks Indexed</div></div>
       </div>
     </div>
   </div>
@@ -721,7 +770,7 @@
       </div>
       <div style="background:var(--surface2);border-radius:8px;padding:14px 16px;font-size:13px;line-height:1.7;color:var(--text2)">
         <strong style="color:var(--text)">To enable real LLM answers:</strong> Render dashboard &rarr; your service &rarr; Environment &rarr; add
-        <code style="color:var(--accent2)">ANTHROPIC_API_KEY</code>, then redeploy. Until then the app runs in Demo mode with real guardrails, tracing and keyword retrieval over your uploaded docs.
+        <code style="color:var(--accent2)">ANTHROPIC_API_KEY</code>, then redeploy. Until then the app answers with its built-in pure-NumPy engine: real BM25 + dense hybrid retrieval, reranking, guardrails and tracing, with extractive cited answers (no LLM).
       </div>
     </div>
 
@@ -847,7 +896,7 @@
         </div>
         <div style="margin-top:16px">
           <div class="mode-note">
-            <strong style="color:var(--text)">Demo mode</strong> (free host) simulates the embedding/LLM stages with <strong>real</strong> guardrails, <strong>real</strong> tracing, and <strong>real</strong> keyword retrieval over your uploaded docs.
+            <strong style="color:var(--text)">Demo mode</strong> (free host) runs a <strong>real</strong> pure-NumPy engine: BM25 + hashed n-gram dense vectors fused with RRF, a feature reranker with MMR, typo correction, a two-tier cache and computed evaluation. Answers are extractive and cited, so nothing is simulated and nothing can be hallucinated. See <code style="color:var(--accent2)">engine.py</code>.
             <br><br>
             <strong style="color:var(--text)">Full mode</strong> (requirements-full.txt + ANTHROPIC_API_KEY) runs real embeddings, vector search, cross-encoder reranking, and Claude-generated answers.
           </div>
@@ -898,6 +947,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
 
     if (tab.dataset.panel === 'traces') loadTraces();
+    liveActive = tab.dataset.panel === 'live';
+    if (liveActive) liveTick();
     if (tab.dataset.panel === 'metrics') { loadMetrics(); loadHealth(); }
   });
 });
@@ -922,11 +973,11 @@ async function loadHealth() {
         if (banner) banner.style.display = 'none';
       }
     }
-    if (data.cache) {
-      document.getElementById('userCacheSize').textContent = data.cache.user_cache_size;
-      document.getElementById('userCacheMax').textContent = data.cache.user_cache_max;
-      document.getElementById('chunkCacheSize').textContent = data.cache.chunk_cache_size;
-      document.getElementById('chunkCacheMax').textContent = data.cache.chunk_cache_max;
+    if (data.engine) {
+      document.getElementById('userCacheSize').textContent = data.engine.cache_entries.toLocaleString();
+      document.getElementById('userCacheMax').textContent = data.engine.cache_exact.toLocaleString();
+      document.getElementById('chunkCacheSize').textContent = data.engine.cache_canonical.toLocaleString();
+      document.getElementById('chunkCacheMax').textContent = data.engine.chunks.toLocaleString();
     }
     return true;
   } catch {
@@ -1048,10 +1099,15 @@ async function runQuery() {
         <div class="source-card">
           <div class="source-meta">
             <span>Source ${i+1}</span>
-            <span>${s.metadata?.doc_name || 'unknown'}</span>
-            <span>${s.metadata?.heading || ''}</span>
-            ${s.rerank_score ? `<span>Score: ${s.rerank_score.toFixed(3)}</span>` : ''}
+            <span>${escHtml(s.metadata?.doc_name || 'unknown')}</span>
+            <span>${escHtml(s.metadata?.heading || '')}</span>
+            ${s.rerank_score != null ? `<span>Score: ${s.rerank_score.toFixed(3)}</span>` : ''}
           </div>
+          ${s.scores ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <span class="score-chip" title="BM25 lexical score">bm25 ${s.scores.bm25.toFixed(2)}</span>
+            <span class="score-chip" title="Cosine similarity of hashed n-gram embeddings">dense ${s.scores.dense.toFixed(3)}</span>
+            <span class="score-chip" title="Reciprocal rank fusion of both retrievers">rrf ${s.scores.rrf.toFixed(4)}</span>
+          </div>` : ''}
           <div class="source-text">${escHtml(s.text)}</div>
         </div>
       `).join('');
@@ -1061,7 +1117,7 @@ async function runQuery() {
     // Trace waterfall
     if (data.trace && data.trace.spans) {
       document.getElementById('traceCard').classList.remove('hidden');
-      document.getElementById('traceTotal').textContent = `Total: ${data.trace.total_ms.toFixed(0)}ms`;
+      document.getElementById('traceTotal').textContent = `Total: ${fmtMs(data.trace.total_ms)}`;
       renderWaterfall('traceWaterfall', data.trace.spans, data.trace.total_ms);
       animateFlow(data.trace.spans);
     }
@@ -1085,6 +1141,7 @@ async function runQuery() {
         ${evalBar('Faithfulness', ev.faithfulness)}
         ${evalBar('Relevance', ev.relevance)}
         ${evalBar('Completeness', ev.completeness)}
+        ${ev.context_precision != null ? evalBar('Context precision', ev.context_precision) : ''}
         <div style="margin-top:12px;font-size:13px;color:var(--text2)">${escHtml(ev.detail || '')}</div>
       `;
     }
@@ -1106,6 +1163,14 @@ async function runQuery() {
   }
 }
 
+// Real spans are often well under a millisecond, so show microseconds when it helps.
+function fmtMs(ms) {
+  if (ms == null) return '-';
+  if (ms < 1) return Math.round(ms * 1000) + '\u00b5s';
+  if (ms < 100) return ms.toFixed(2) + 'ms';
+  return ms.toFixed(0) + 'ms';
+}
+
 function evalBar(label, value) {
   const pct = (value * 100).toFixed(0);
   const color = value >= 0.8 ? 'var(--green)' : value >= 0.5 ? 'var(--orange)' : 'var(--red)';
@@ -1122,11 +1187,11 @@ function renderWaterfall(containerId, spans, totalMs) {
     const pct = Math.max(2, (s.duration_ms / totalMs) * 100);
     const color = SPAN_COLORS[i % SPAN_COLORS.length];
     return `<div class="trace-span">
-      <div class="span-name">${s.name}</div>
+      <div class="span-name">${escHtml(s.name)}</div>
       <div class="span-bar-container">
-        <div class="span-bar" style="width:${pct}%;background:${color}">${s.duration_ms.toFixed(0)}ms</div>
+        <div class="span-bar" style="width:${pct}%;background:${color}"></div>
       </div>
-      <div class="span-ms">${s.duration_ms.toFixed(1)}ms</div>
+      <div class="span-ms">${fmtMs(s.duration_ms)}</div>
     </div>`;
   }).join('');
 }
@@ -1398,7 +1463,7 @@ async function loadTraces() {
       <div class="trace-item" onclick="loadTraceDetail('${t.trace_id}')">
         <span class="trace-id">${t.trace_id}</span>
         <span class="trace-query">${escHtml(t.query)}</span>
-        <span class="trace-time">${t.total_ms.toFixed(0)}ms</span>
+        <span class="trace-time">${fmtMs(t.total_ms)}</span>
       </div>
     `).join('');
   } catch {
@@ -1412,7 +1477,7 @@ async function loadTraceDetail(traceId) {
     const data = await res.json();
     document.getElementById('traceDetailCard').classList.remove('hidden');
     document.getElementById('traceDetailId').textContent = data.trace_id;
-    document.getElementById('traceDetailQuery').textContent = `"${data.query}" - Total: ${data.total_ms.toFixed(0)}ms`;
+    document.getElementById('traceDetailQuery').textContent = `"${data.query}" - Total: ${fmtMs(data.total_ms)}`;
     renderWaterfall('traceDetailWaterfall', data.spans, data.total_ms);
 
     // Show span metadata
@@ -1445,6 +1510,7 @@ async function loadMetrics() {
           <td>${stats.mean}</td>
           <td>${stats.p50}</td>
           <td>${stats.p95}</td>
+          <td>${stats.p99 ?? '-'}</td>
           <td>${stats.min}</td>
           <td>${stats.max}</td>
         </tr>
@@ -1493,6 +1559,109 @@ async function testGuardrail() {
 }
 
 // --- Utils ---
+// --- Mission Control ---
+let liveActive = false, liveTimer = null, liveQuestions = [], liveBusy = false;
+const LIVE_COLORS = ['#338ced', '#e76624'];
+
+function liveChart(id, points, series, unit) {
+  const host = document.getElementById(id);
+  const W = 420, H = 150, L = 40, R = 8, T = 6, B = 20;
+  let ymax = Math.max(...series.flatMap(([k]) => points.map(p => p[k] ?? 0)));
+  ymax = unit === '%' ? 1 : (ymax || 1) * 1.15;
+  const n = points.length, X = i => L + (i / (n - 1)) * (W - L - R), Y = v => T + (1 - v / ymax) * (H - T - B);
+  const lab = v => unit === '%' ? Math.round(v * 100) + '%' : (v >= 100 ? Math.round(v) : +v.toFixed(v < 1 ? 2 : 1));
+  let g = '';
+  for (let i = 0; i <= 3; i++) { const v = ymax * i / 3, y = Y(v);
+    g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--border)" stroke-width="1"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${lab(v)}</text>`; }
+  g += `<text x="${L}" y="${H - 4}">2 min ago</text><text x="${W - R}" y="${H - 4}" text-anchor="end">now</text>`;
+  series.forEach(([k], si) => { let d = '', pen = false;
+    points.forEach((p, i) => { if (p[k] == null) { pen = false; return; } d += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(p[k]).toFixed(1); pen = true; });
+    g += `<path d="${d}" fill="none" stroke="${LIVE_COLORS[si]}" stroke-width="2" stroke-linejoin="round"/>`; });
+  const legend = series.length > 1 ? `<div class="live-legend">${series.map(([, name], i) => `<span><i style="background:${LIVE_COLORS[i]}"></i>${name}</span>`).join('')}</div>` : '';
+  host.innerHTML = `${legend}<svg viewBox="0 0 ${W} ${H}" role="img">${g}<line class="x" y1="${T}" y2="${H - B}" stroke="var(--text2)" visibility="hidden"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg><div class="live-tip"></div>`;
+  const svg = host.querySelector('svg'), cross = host.querySelector('.x'), tip = host.querySelector('.live-tip');
+  svg.onpointermove = e => {
+    const b = svg.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.round(((e.clientX - b.left) / b.width * W - L) / (W - L - R) * (n - 1))));
+    cross.setAttribute('x1', X(i)); cross.setAttribute('x2', X(i)); cross.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<b>${n - 1 - i}s ago</b><br>` + series.map(([k, name], si) =>
+      `<i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${LIVE_COLORS[si]};margin-right:5px"></i>${name}: <b>${points[i][k] == null ? '-' : unit === '%' ? (points[i][k] * 100).toFixed(1) + '%' : unit === 'ms' ? fmtMs(points[i][k]) : points[i][k]}</b>`).join('<br>');
+    tip.style.display = 'block';
+    tip.style.left = Math.min(e.clientX - b.left + 12, b.width - tip.offsetWidth) + 'px';
+    tip.style.top = (svg.offsetTop + 4) + 'px';
+  };
+  svg.onpointerleave = () => { cross.setAttribute('visibility', 'hidden'); tip.style.display = 'none'; };
+}
+
+async function liveTick() {
+  clearTimeout(liveTimer);
+  if (!liveActive) return;
+  try {
+    const d = await (await fetch(BASE + '/stats?window=10')).json();
+    const w = d.window, up = d.uptime_s;
+    document.getElementById('liveQps').textContent = w.qps.toLocaleString();
+    document.getElementById('liveP50').textContent = w.queries ? fmtMs(w.latency_ms.p50) : '-';
+    document.getElementById('liveP99').textContent = w.queries ? fmtMs(w.latency_ms.p99) : '-';
+    document.getElementById('liveHit').textContent = w.queries ? (w.cache_hit_rate * 100).toFixed(0) + '%' : '-';
+    document.getElementById('liveTotal').textContent = d.totals.queries.toLocaleString();
+    document.getElementById('liveChunks').textContent = d.engine.chunks.toLocaleString();
+    document.getElementById('liveRss').textContent = d.rss_mb.toFixed(0) + ' MB';
+    document.getElementById('liveUp').textContent = up < 90 ? Math.round(up) + 's' : up < 5400 ? Math.round(up / 60) + ' min' : (up / 3600).toFixed(1) + ' h';
+    if (!document.querySelector('#panel-live .live-chart:hover')) {
+      liveChart('liveChartQps', d.series, [['qps', 'queries/s']], '');
+      liveChart('liveChartLat', d.series, [['p50', 'p50'], ['p99', 'p99']], 'ms');
+      liveChart('liveChartHit', d.series, [['hit_rate', 'hit rate']], '%');
+    }
+  } catch {}
+  liveTimer = setTimeout(liveTick, 1000);
+}
+
+function liveSay(msg) { document.getElementById('liveStatus').textContent = msg; }
+
+async function liveLoadCorpus() {
+  const btn = document.getElementById('liveCorpusBtn');
+  btn.disabled = true; liveSay('Indexing 500 synthetic service runbooks (4,000 chunks)...');
+  try {
+    const t = performance.now();
+    const d = await (await fetch(BASE + '/demo/load_corpus', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ docs: 500 }) })).json();
+    liveQuestions = d.questions || [];
+    const q = d.sample_questions.find(x => x.kind === 'typo') || d.sample_questions[0];
+    liveSay(`Indexed ${d.index.chunks.toLocaleString()} chunks in ${((performance.now() - t) / 1000).toFixed(1)}s. Try this one on the Query tab (note the typo): "${q.query}"`);
+  } catch (e) { liveSay('Could not load the corpus: ' + e.message); }
+  btn.disabled = false;
+}
+
+async function liveFire() {
+  if (liveBusy) return;
+  liveBusy = true;
+  const btn = document.getElementById('liveFireBtn'); btn.disabled = true;
+  const pool = liveQuestions.length ? liveQuestions.map(q => q.query)
+    : ['What is RAG?', 'How does reranking work?', 'Do I need an API key?', 'what do the guardrails do', 'how does cachng work', 'Can I upload my own documents?', 'does it work on the free tier', 'what is the LoRA lab'];
+  const TOTAL = 2000, CONC = 8;
+  let sent = 0, done = 0, failed = 0;
+  const t0 = performance.now();
+  const worker = async () => {
+    while (sent < TOTAL) {
+      sent++;
+      // 70% from a small hot set (cache hits), 30% from the whole pool.
+      const q = Math.random() < 0.7 ? pool[Math.floor(Math.random() * Math.min(40, pool.length))] : pool[Math.floor(Math.random() * pool.length)];
+      try { const r = await fetch(BASE + '/demo/query', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ query: q }) }); if (!r.ok) failed++; await r.json(); }
+      catch { failed++; }
+      done++;
+      if (done % 100 === 0) liveSay(`Fired ${done.toLocaleString()} of ${TOTAL.toLocaleString()} queries...`);
+    }
+  };
+  await Promise.all(Array.from({ length: CONC }, worker));
+  const secs = (performance.now() - t0) / 1000;
+  liveSay(`${TOTAL.toLocaleString()} queries in ${secs.toFixed(1)}s from this browser tab (${Math.round(TOTAL / secs).toLocaleString()} per second, ${failed} failed).`);
+  btn.disabled = false; liveBusy = false;
+}
+
+async function liveReset() {
+  try { await fetch(BASE + '/demo/reset', { method: 'POST' }); liveQuestions = []; liveSay('Index reset to the three seed documents.'); }
+  catch (e) { liveSay('Reset failed: ' + e.message); }
+}
+
 function escHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;

@@ -9,7 +9,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import cache
+import demo_store  # seeds the engine with the sample docs on import
+import livestats
 import tracing
+from engine import ENGINE
 
 # NOTE: `pipeline` and `evaluation` pull in heavy ML deps (torch / chromadb /
 # sentence-transformers) transitively. They are imported lazily inside the
@@ -19,7 +22,37 @@ import tracing
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Optimized RAG Pipeline", version="2.0.0")
+app = FastAPI(title="Optimized RAG Pipeline", version="3.0.0")
+
+
+class StatsMiddleware:
+    """Feed every request into the live stats behind /stats and Mission Control.
+
+    Plain ASGI rather than @app.middleware("http"): the latter wraps each request in
+    extra tasks and streams, which costs real throughput on a hot path.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        status = 500
+
+        async def _send(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            livestats.record_request(error=status >= 500)
+
+
+app.add_middleware(StatsMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -90,13 +123,14 @@ def _ingest(doc_name: str, text: str) -> dict:
     embedding stack is missing (RuntimeError) or unimportable (ImportError), so we
     fall back to a pure-Python in-memory store — uploading then querying still works.
     """
+    # The NumPy engine always indexes the doc, so demo-mode queries can cite it.
+    n = demo_store.add_document(doc_name, text)
     try:
         import pipeline  # lazy: heavy ML deps, see top-of-file note
         return pipeline.ingest_document(doc_name, text)
     except (RuntimeError, ImportError):
-        import demo_store
-        n = demo_store.add_document(doc_name, text)
-        return {"status": "indexed (demo)", "doc_name": doc_name, "chunks": n}
+        return {"status": "indexed (hybrid engine)", "doc_name": doc_name, "chunks": n,
+                "index": ENGINE.stats()}
 
 
 @app.post("/ingest")
@@ -187,7 +221,46 @@ async def handle_eval(req: EvalRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "cache": cache.cache_stats()}
+    return {"status": "ok", "cache": cache.cache_stats(), "engine": ENGINE.stats()}
+
+
+@app.get("/stats")
+async def stats(window: int = 60):
+    """Live rolling stats: throughput, latency percentiles, cache hit rate, memory, index size."""
+    window = max(1, min(window, livestats.WINDOW_SECONDS))
+    return {**livestats.snapshot(window=window), "engine": ENGINE.stats()}
+
+
+class CorpusRequest(BaseModel):
+    docs: int = 500
+
+
+@app.post("/demo/load_corpus")
+async def load_corpus(req: CorpusRequest):
+    """Index N synthetic service runbooks (with known answers) so there is a real corpus to
+    search. Returns a few sample questions, including one with a typo."""
+    import asyncio
+    import corpus
+    n = max(1, min(req.docs, 5000))
+    docs, questions = corpus.build(n)
+
+    # Index on the event loop (the engine is single-threaded by design), yielding
+    # between batches so queries keep flowing while a big corpus loads.
+    for i, d in enumerate(docs):
+        ENGINE.add_document(d["doc_name"], d["content"])
+        if i % 20 == 19:
+            await asyncio.sleep(0)
+    samples = [next(q for q in questions if q["kind"] == k) for k in ("plain", "paraphrase", "typo")]
+    return {"status": "indexed", "documents": n, "index": ENGINE.stats(), "sample_questions": samples,
+            "questions": [{"query": q["query"], "answer": q["answer"]} for q in questions[:400]]}
+
+
+@app.post("/demo/reset")
+async def reset_index():
+    """Drop everything and reload just the seed documents."""
+    ENGINE.reset()
+    demo_store.seed()
+    return {"status": "reset", "index": ENGINE.stats()}
 
 
 @app.get("/traces")
@@ -213,11 +286,7 @@ async def get_metrics():
 
 # --- Demo Mode (works without API key) ---
 
-import config
-import guardrails as _guardrails
-import uuid
-import time  # noqa: E402
-import random  # noqa: E402
+import config  # noqa: E402
 
 
 @app.get("/config/status")
@@ -228,126 +297,15 @@ async def config_status():
 
 @app.post("/demo/query")
 async def demo_query(req: QueryRequest):
-    """Demo query that simulates the full pipeline without needing an API key."""
-    query = req.query.strip()
-    if not query:
+    """Answer with the pure-NumPy hybrid engine: no API key, no heavy deps, nothing simulated.
+
+    Every span in the returned trace is a real measured stage (see engine.py).
+    """
+    if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
-
-    trace_id = str(uuid.uuid4())[:8]
-    start = time.time()
-
-    # Real input guardrails
-    input_check = _guardrails.validate_input(query)
-    if not input_check["safe"]:
-        return {
-            "answer": "I can't process this query due to safety concerns.",
-            "blocked": True,
-            "issues": input_check["issues"],
-            "trace": {
-                "trace_id": trace_id, "query": query,
-                "total_ms": round((time.time() - start) * 1000, 2),
-                "spans": [{"name": "input_guardrails", "duration_ms": 1.2, "metadata": input_check}],
-            },
-        }
-
-    # Simulate realistic pipeline timing
-    def _span(name, ms_base, **meta):
-        jitter = random.uniform(0.8, 1.3)
-        return {"name": name, "duration_ms": round(ms_base * jitter, 2), "metadata": meta}
-
-    # Check if we have real chunks in the heavy vector store (full mode).
-    try:
-        from vector_store import get_collection, embed_texts
-        collection = get_collection()
-        count = collection.count()
-    except Exception:
-        count = 0
-
-    sources = []
-    store_total = 0  # total chunks considered (for realistic span metadata)
-    if count > 0:
-        try:
-            emb = embed_texts([query])
-            results = collection.query(query_embeddings=emb, n_results=min(5, count),
-                                       include=["documents", "metadatas", "distances"])
-            store_total = count
-            for i in range(len(results["ids"][0])):
-                sources.append({
-                    "text": results["documents"][0][i][:200] + ("..." if len(results["documents"][0][i]) > 200 else ""),
-                    "metadata": results["metadatas"][0][i],
-                    "rerank_score": round(random.uniform(0.6, 0.95), 3),
-                })
-        except Exception:
-            pass
-
-    # Slim mode: pull REAL sources from the in-memory store (seeded + ingested docs).
-    if not sources:
-        try:
-            import demo_store
-            store_total = demo_store.count()
-            sources = demo_store.search(query, top_k=5)
-        except Exception:
-            sources = []
-
-    # Last resort (store empty): canned demo sources so the UI still renders.
-    if not sources:
-        sources = [
-            {"text": "RAG enhances LLMs by retrieving relevant context from a knowledge base before generating responses...",
-             "metadata": {"doc_name": "demo-doc", "heading": "What is RAG?", "doc_type": "general"}, "rerank_score": 0.92},
-            {"text": "The pipeline: chunk documents, embed them, store in vector DB, retrieve similar chunks, rerank, generate answer...",
-             "metadata": {"doc_name": "demo-doc", "heading": "How it Works", "doc_type": "tutorial"}, "rerank_score": 0.87},
-            {"text": "Structure-aware chunking splits by headings and paragraphs. Fixed-size fallback with overlap handles long sections...",
-             "metadata": {"doc_name": "demo-doc", "heading": "Chunking", "doc_type": "general"}, "rerank_score": 0.74},
-        ]
-
-    # Build the answer from the ACTUAL retrieved sources, citing each one.
-    answer_parts = ["Based on the retrieved documents:\n"]
-    for i, s in enumerate(sources[:3]):
-        answer_parts.append(f"{s['text'][:180]} [Source {i + 1}]")
-    answer = "\n\n".join(answer_parts)
-
-    output_check = _guardrails.validate_output(answer, [{"text": s["text"][:200], "metadata": s.get("metadata", {})} for s in sources])
-
-    spans = [
-        _span("input_guardrails", 1.5, safe=True),
-        _span("user_cache_check", 0.3, hit=False),
-        _span("query_rewrite", 450, original=query, rewritten=f"detailed explanation of: {query}"),
-        _span("query_expansion", 380, num_variants=3),
-        _span("embedding", 45, num_embeddings=4),
-        _span("chunk_cache_check", 0.2, hit=False),
-        _span("parallel_vector_search", 28, num_hits=(store_total or len(sources))),
-        _span("reranking", 120, before=(store_total or len(sources)), after=len(sources)),
-        _span("agentic_retrieval", 1800, iterations=2, grounded=True),
-        _span("output_guardrails", 1.0, **output_check),
-    ]
-    total_ms = sum(s["duration_ms"] for s in spans)
-
-    trace_data = {"trace_id": trace_id, "query": query, "total_ms": round(total_ms, 2), "spans": spans}
-    tracing._save_trace(trace_data)
-
-    result = {
-        "answer": answer,
-        "sources": sources,
-        "cached": False,
-        "grounded": True,
-        "output_safety": output_check,
-        "trace": trace_data,
-        "reasoning_trace": [
-            f"Iteration 1: Evaluating retrieved context — considered {store_total or len(sources)} chunks, kept top {len(sources)} for the query topic.",
-            "Searching: ['RAG pipeline architecture', 'retrieval augmented generation techniques']",
-            "Iteration 2: Context is sufficient to provide a comprehensive answer.",
-            "Final answer generated (grounded=True)",
-        ],
-    }
-
-    if req.evaluate:
-        result["evaluation"] = {
-            "faithfulness": round(random.uniform(0.82, 0.98), 2),
-            "relevance": round(random.uniform(0.85, 0.99), 2),
-            "completeness": round(random.uniform(0.70, 0.95), 2),
-            "detail": "Answer is well-supported by sources with proper citations.",
-        }
-
+    result = ENGINE.query(req.query, evaluate=req.evaluate)
+    livestats.record_query(result["trace"]["total_ms"], cached=result.get("cached", False),
+                           blocked=result.get("blocked", False), grounded=result.get("grounded", True))
     return result
 
 

@@ -15,3 +15,7 @@ traces/
 # LoRA training outputs (build artifacts)
 lora_out/
 .venv-lora/
+
+# Soak output (the committed 1-hour run lives in reports/soak-1h/)
+reports/soak/
+.pytest_cache/

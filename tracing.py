@@ -5,29 +5,38 @@ Stores traces in memory and on disk for analysis.
 """
 
 import json
+import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 TRACE_DIR = Path(__file__).parent / "traces"
-TRACE_DIR.mkdir(exist_ok=True)
 
-# In-memory store for recent traces
-_recent_traces: list[dict] = []
+# Traces live in a bounded in-memory ring. Writing one JSON file per query (the old
+# behaviour) fills the disk under sustained load — a 1-hour soak makes millions of
+# files — so disk persistence is opt-in (TRACE_PERSIST=1) and evicted traces are
+# deleted so the directory stays bounded too.
+PERSIST = os.getenv("TRACE_PERSIST", "") == "1"
+if PERSIST:
+    TRACE_DIR.mkdir(exist_ok=True)
+
 MAX_RECENT = 500
+_recent_traces: deque[dict] = deque()
+_by_id: dict[str, dict] = {}
 
 
 @dataclass
 class Span:
     name: str
-    start_time: float = field(default_factory=time.time)
+    start_time: float = field(default_factory=time.perf_counter)
     end_time: float | None = None
     metadata: dict = field(default_factory=dict)
 
     def finish(self, **extra_metadata):
-        self.end_time = time.time()
+        self.end_time = time.perf_counter()
         self.metadata.update(extra_metadata)
 
     @property
@@ -39,16 +48,16 @@ class Span:
     def to_dict(self) -> dict:
         return {
             "name": self.name,
-            "duration_ms": round(self.duration_ms, 2),
+            "duration_ms": round(self.duration_ms, 4),
             "metadata": self.metadata,
         }
 
 
 class Trace:
     def __init__(self, query: str):
-        self.trace_id = str(uuid.uuid4())[:8]
+        self.trace_id = uuid.uuid4().hex[:12]
         self.query = query
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
         self.spans: list[Span] = []
         self._current_span: Span | None = None
 
@@ -70,11 +79,11 @@ class Trace:
         self.finish_span()
 
     def finish(self) -> dict:
-        total_ms = (time.time() - self.start_time) * 1000
+        total_ms = (time.perf_counter() - self.start_time) * 1000
         result = {
             "trace_id": self.trace_id,
             "query": self.query,
-            "total_ms": round(total_ms, 2),
+            "total_ms": round(total_ms, 4),
             "spans": [s.to_dict() for s in self.spans],
         }
         _save_trace(result)
@@ -83,22 +92,23 @@ class Trace:
 
 def _save_trace(trace: dict):
     _recent_traces.append(trace)
-    if len(_recent_traces) > MAX_RECENT:
-        _recent_traces.pop(0)
-
-    path = TRACE_DIR / f"{trace['trace_id']}.json"
-    path.write_text(json.dumps(trace, indent=2))
+    _by_id[trace["trace_id"]] = trace
+    if PERSIST:
+        (TRACE_DIR / f"{trace['trace_id']}.json").write_text(json.dumps(trace, indent=2))
+    while len(_recent_traces) > MAX_RECENT:
+        old = _recent_traces.popleft()
+        _by_id.pop(old["trace_id"], None)
+        if PERSIST:
+            (TRACE_DIR / f"{old['trace_id']}.json").unlink(missing_ok=True)
 
 
 def get_recent_traces(limit: int = 20) -> list[dict]:
-    return _recent_traces[-limit:]
+    limit = max(0, min(limit, MAX_RECENT))
+    return list(_recent_traces)[-limit:] if limit else []
 
 
 def get_trace(trace_id: str) -> dict | None:
-    path = TRACE_DIR / f"{trace_id}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+    return _by_id.get(trace_id)
 
 
 def get_latency_summary() -> dict:
@@ -113,13 +123,14 @@ def get_latency_summary() -> dict:
             span_totals.setdefault(s["name"], []).append(s["duration_ms"])
 
     def _stats(values: list[float]) -> dict:
-        values.sort()
+        values = sorted(values)
         return {
-            "mean": round(sum(values) / len(values), 2),
-            "p50": round(values[len(values) // 2], 2),
-            "p95": round(values[int(len(values) * 0.95)], 2),
-            "min": round(values[0], 2),
-            "max": round(values[-1], 2),
+            "mean": round(sum(values) / len(values), 3),
+            "p50": round(values[len(values) // 2], 3),
+            "p95": round(values[min(len(values) - 1, int(len(values) * 0.95))], 3),
+            "p99": round(values[min(len(values) - 1, int(len(values) * 0.99))], 3),
+            "min": round(values[0], 3),
+            "max": round(values[-1], 3),
         }
 
     return {
