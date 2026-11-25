@@ -1,121 +1,39 @@
-"""Pure-Python, in-memory retrieval store for the slim (free-tier) deployment.
+"""Thin compatibility shim over `engine.py` + the seed documents.
 
-When the heavy embedding stack (torch / chromadb / sentence-transformers) isn't
-installed, we still want uploading a document and then querying it to work. This
-module provides a tiny keyword/token-overlap retriever that depends only on the
-stdlib plus the dependency-free `chunking.py`.
-
-Design notes (this codebase values simplicity):
-  - Chunks live in a plain module-level list `_CHUNKS`.
-  - Retrieval is classic bag-of-words token overlap with a light TF weighting and
-    a small bonus when a query token also appears in the chunk's heading.
-  - Everything is easy to tweak: see the small constants near `search()`.
+The in-memory store used to be a keyword-overlap toy; it is now the real hybrid
+engine (BM25 + dense + rerank) in `engine.py`. This module keeps the old
+`add_document / search / count / reset` API and owns the seed corpus that makes
+the app answer questions before anything is uploaded.
 """
 
-import re
+from engine import ENGINE
 
-from chunking import chunk_by_structure
-
-# --- In-memory store -------------------------------------------------------
-
-# Each entry: {"text": str, "metadata": {"doc_name", "heading", "doc_type", ...}}
-_CHUNKS: list[dict] = []
-
-# Tokenizer: lowercase words on \w+ boundaries. Reused for query + chunk text.
-_TOKEN_RE = re.compile(r"\w+")
-
-
-def _tokenize(text: str) -> list[str]:
-    """Lowercase + split on word boundaries."""
-    return _TOKEN_RE.findall(text.lower())
-
-
-# --- Mutation API ----------------------------------------------------------
 
 def add_document(doc_name: str, text: str) -> int:
-    """Chunk `text` and add it to the store, returning the number of chunks added.
-
-    Any chunks previously added under the same `doc_name` are removed first, so
-    re-uploading a document updates it in place rather than duplicating.
-    """
-    # Drop prior chunks from this doc so re-upload replaces instead of duplicates.
-    global _CHUNKS
-    _CHUNKS = [c for c in _CHUNKS if c["metadata"].get("doc_name") != doc_name]
-
-    chunks = chunk_by_structure(text, doc_name, max_chunk_size=512, overlap=50)
-    for ch in chunks:
-        _CHUNKS.append({"text": ch.text, "metadata": ch.metadata})
-    return len(chunks)
+    """Chunk + index `text`; re-adding a doc_name replaces it. Returns chunk count."""
+    return ENGINE.add_document(doc_name, text)
 
 
 def search(query: str, top_k: int = 5) -> list[dict]:
-    """Keyword/token-overlap retrieval over the in-memory store.
-
-    Scoring: for each query token, add (count_in_chunk / (1 + len(chunk_tokens)))
-    — a simple TF weighting that rewards matches in short, focused chunks — plus a
-    small bonus if the token also appears in the chunk's heading.
-
-    Returns up to `top_k` hits as dicts:
-        {"text": <truncated to ~200 chars>, "metadata": ..., "rerank_score": 0..1}
-
-    If nothing overlaps (or the store is empty of matches), falls back to the
-    first `top_k` chunks so a loaded store always returns something.
-    """
-    if not _CHUNKS:
-        return []
-
-    q_tokens = _tokenize(query)
-    HEADING_BONUS = 0.5  # extra weight when a query token appears in the heading
-
-    scored = []  # (raw_score, chunk)
-    for chunk in _CHUNKS:
-        chunk_tokens = _tokenize(chunk["text"])
-        if not chunk_tokens:
-            continue
-        heading_tokens = set(_tokenize(chunk["metadata"].get("heading", "")))
-
-        score = 0.0
-        for qt in q_tokens:
-            count = chunk_tokens.count(qt)
-            if count:
-                score += count / (1 + len(chunk_tokens))
-            if qt in heading_tokens:
-                score += HEADING_BONUS / (1 + len(chunk_tokens))
-        scored.append((score, chunk))
-
-    # If no query token overlapped anything, fall back to first top_k chunks.
-    if not any(s > 0 for s, _ in scored):
-        fallback = _CHUNKS[:top_k]
-        return [_to_hit(c, 0.0, max_score=1.0) for c in fallback]
-
-    scored.sort(key=lambda sc: sc[0], reverse=True)
-    top = scored[:top_k]
-    max_score = top[0][0] or 1.0  # normalize against the best hit
-
-    return [_to_hit(chunk, raw, max_score) for raw, chunk in top]
-
-
-def _to_hit(chunk: dict, raw_score: float, max_score: float) -> dict:
-    """Shape a stored chunk into the response dict the frontend expects."""
-    text = chunk["text"]
-    truncated = text[:200] + ("..." if len(text) > 200 else "")
-    norm = round(raw_score / max_score, 3) if max_score else 0.0
-    return {"text": truncated, "metadata": chunk["metadata"], "rerank_score": norm}
+    """Hybrid retrieval + rerank. Returns [{"text", "metadata", "rerank_score", "scores"}]."""
+    cands, detail = ENGINE.hybrid_search([query])
+    hits = ENGINE.rerank(query, cands, detail, top_k=top_k)
+    return [{"text": h["text"][:200] + ("..." if len(h["text"]) > 200 else ""), "metadata": h["metadata"],
+             "rerank_score": h["rerank_score"], "scores": h["scores"]} for h in hits]
 
 
 def count() -> int:
-    """Number of chunks currently in the store."""
-    return len(_CHUNKS)
+    return ENGINE.n_alive
 
 
 def reset() -> None:
     """Clear the store (mainly for tests)."""
-    _CHUNKS.clear()
+    ENGINE.reset()
 
 
 # --- Seed documents --------------------------------------------------------
-# Loaded on import so queries return real-looking citations even before any
-# upload. Tweak freely — these are plain markdown with ## headings.
+# Loaded on import so queries return real citations even before any upload.
+# Tweak freely — these are plain markdown with ## headings.
 
 SEED_DOCS: dict[str, str] = {
     "what-is-rag.md": """## What is RAG
@@ -185,10 +103,10 @@ and query still work end to end.
 }
 
 
-def _seed() -> None:
-    """Populate the store with the sample documents on import."""
+def seed() -> None:
+    """(Re)load the sample documents."""
     for name, text in SEED_DOCS.items():
         add_document(name, text)
 
 
-_seed()
+seed()

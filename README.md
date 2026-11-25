@@ -1,6 +1,12 @@
 # rag-optimized
 
-An observable, optimized RAG pipeline with a web UI and a no-API-key demo mode.
+An observable, optimized RAG pipeline with a web UI. With no API key, no GPU and no vector database it still does **real** retrieval: a pure-NumPy hybrid engine (BM25 + dense vectors, fused, reranked, cached, traced) that answers in about 2 ms and has been soak-tested for an hour straight.
+
+| | |
+| --- | --- |
+| Retrieval, 2,000 docs / 16,000 chunks | recall@5 **99.5%**, MRR 0.97 (`python bench.py`) |
+| Uncached pipeline latency, one core | p50 **2.1 ms**, p99 4.0 ms |
+| 1-hour soak | **2,254,787 requests, 0 errors**, p50 11.4 ms / p99 32.7 ms at the client, throughput flat start to finish ([report](reports/soak-1h/report.md)) |
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sugeerth/rag-optimized)
 
@@ -22,7 +28,7 @@ That's it. The slim dependencies are enough to run the web UI and the full demo 
 
 ## Demo mode vs full mode
 
-**Demo mode (default, zero config).** With just the slim `requirements.txt` and no API key, the app simulates the full RAG pipeline end to end — query transformation, retrieval, reranking, and answer synthesis — with **real guardrails and real span tracing** so you can watch every stage. Perfect for exploring, demoing, or deploying to the cloud for free.
+**Demo mode (default, zero config).** With just the slim `requirements.txt` and no API key, the app runs the whole pipeline for real on a pure-NumPy engine (`engine.py`). Nothing is simulated and every trace span is a measured stage. The one thing it does not do is generate text: answers are the best-supported sentences from your documents, each with its citation, and it declines when the evidence is weak.
 
 **Full mode (real RAG).** To run real embeddings, vector search, cross-encoder reranking, and LLM-generated answers:
 
@@ -33,6 +39,70 @@ uvicorn server:app --reload
 ```
 
 `requirements-full.txt` adds the heavy pieces (ChromaDB + sentence-transformers) on top of the slim set. Set `ANTHROPIC_API_KEY` to get real LLM answers; without it, the app stays in demo mode.
+
+---
+
+## The engine (`engine.py`)
+
+Every query goes through these stages, each a timed span you can see in the UI:
+
+| Stage | What actually runs |
+| --- | --- |
+| Input guardrails | Prompt-injection and PII patterns; unsafe queries stop here |
+| Cache | Two tiers: exact string, then a canonical key (stemmed, stopwords dropped, order ignored) so "What is RAG?" and "rag what is" share an entry. Any ingest invalidates it; re-ingesting identical content is a no-op |
+| Query rewrite | Drops filler words and fixes typos against the index vocabulary (edit distance 1, or 2 for long words) |
+| Multi-query expansion | Pseudo-relevance feedback: the most distinctive terms from the top BM25 hits become an extra query variant |
+| Hybrid search | BM25 inverted index (heading terms boosted) plus cosine over hashed n-gram embeddings, scored for all variants in one BLAS call and fused with reciprocal rank fusion |
+| Rerank | Scores the fused pool on term coverage, BM25, dense similarity, phrase and heading matches, then MMR for diversity |
+| Agentic loop | Checks how much of the question the context covers; if key terms are missing it searches again for them, and it refuses to answer below a grounding threshold |
+| Answer + evaluation | Extractive, cited sentences. Faithfulness, relevance, completeness and context precision are computed from the text, not sampled |
+
+The dense vectors are feature-hashed word and character n-grams, not a neural model. They make retrieval robust to typos and word forms, which is what BM25 is bad at. They do not understand synonyms: a question whose wording never appears in the documents ("who gets paged" for a doc that says "owned by") finds the right document but often the wrong sentence. Full mode's sentence-transformer embeddings close that gap.
+
+### Measure it
+
+```
+python bench.py        # 2,000 docs, 2,000 questions with known answers
+```
+
+`corpus.py` generates service runbooks with known facts, so quality is measured rather than eyeballed. A third of the questions carry a typo or a paraphrase.
+
+| Question type | n | recall@1 | recall@5 | MRR | Answer contains the fact |
+| --- | --- | --- | --- | --- | --- |
+| Worded like the docs | 1,019 | 96.7% | 100% | 0.983 | 90.6% |
+| Typo in the service name | 514 | 94.2% | 98.1% | 0.958 | 88.9% |
+| Paraphrased | 467 | 93.1% | 100% | 0.966 | 68.5% |
+| All | 2,000 | 95.2% | 99.5% | 0.973 | 85.0% |
+
+### Soak it
+
+```
+python soak.py --duration 3600     # one hour; spawns its own server
+python soak.py --duration 60       # quick version
+```
+
+Eight closed-loop clients ask checked questions while another thread re-ingests documents (cache invalidation, tombstones, index compaction) and a third kicks off LoRA fine-tunes. Prompt-injection and PII queries must be blocked and off-topic questions must be declined; the run exits non-zero on any error. It writes `report.html` (charts), `report.md`, `summary.json` and `timeseries.jsonl`.
+
+**The recorded 1-hour run** ([`reports/soak-1h/`](reports/soak-1h/report.md), charts in `report.html`), one uvicorn worker on a 4-CPU box:
+
+| | Baseline run | After the compaction fix |
+| --- | --- | --- |
+| Requests served | 1,908,763 | **2,254,787** |
+| Errors / failed safety checks | 0 / 0 | **0 / 0** |
+| Average throughput | 530 req/s | **626 req/s** |
+| Throughput, first 10% vs last 10% | 587 to 426 (-27%) | **601 to 628 (+4.5%)** |
+| Latency p50 / p99 (client side) | 13.5 / 39.1 ms | **11.4 / 32.7 ms** |
+| Worst single request | 2,224 ms | **256 ms** |
+| Recall@5 / answer accuracy | 99.2% / 81.9% | **99.5% / 82.3%** |
+| Server memory, start to end | 188 to 301 MB | 188 to 276 MB |
+
+The first run ([`reports/soak-1h-baseline/`](reports/soak-1h-baseline/report.md)) is kept because it is why the soak exists: it passed every correctness check but showed throughput sagging as deleted chunks piled up in the index, and one 2.2-second stall when they were finally cleaned out. Compaction was rewritten to remap ids in place (about 55 ms) and run at 5% dead chunks, and the second run is flat.
+
+Still open: memory grew 88 MB over the hour in the second run, slowing but not flat by the end. Roughly 30 MB of that is the one-hour `/stats` window filling up, which is bounded; the rest has not been tracked down, so a multi-hour run is the next thing to try.
+
+### Watch it
+
+The **Mission Control** tab polls `GET /stats` every second: queries per second, p50/p99, cache hit rate, memory, index size. It can load a 500-document corpus and fire 2,000 queries from your browser so you can watch the numbers move.
 
 ---
 
@@ -52,7 +122,14 @@ Everything is plain Python and easy to tweak. Here's where each piece lives:
 
 | File | What it does |
 | --- | --- |
-| `server.py` | FastAPI routes + the demo endpoint; serves the web UI |
+| `server.py` | FastAPI routes; serves the web UI |
+| `engine.py` | The pure-NumPy hybrid engine: BM25, dense vectors, fusion, rerank, cache, answers |
+| `demo_store.py` | Seed documents + a thin wrapper over the engine |
+| `livestats.py` | Rolling per-second stats behind `/stats` and Mission Control |
+| `corpus.py` | Synthetic corpus with ground-truth answers |
+| `bench.py` | Retrieval quality + latency benchmark |
+| `soak.py`, `soak_report.py` | Soak test and its HTML/Markdown report |
+| `tests/` | `pytest -q` (install `requirements-dev.txt`) |
 | `pipeline.py` | RAG orchestration — wires all the stages together |
 | `vector_store.py` | ChromaDB + embeddings (vector storage and search) |
 | `reranker.py` | Cross-encoder reranking of retrieved chunks |
@@ -61,7 +138,7 @@ Everything is plain Python and easy to tweak. Here's where each piece lives:
 | `agentic_rag.py` | Agentic retrieval loop (multi-step reasoning) |
 | `guardrails.py` | Input/output safety + PII handling |
 | `cache.py` | User + chunk caches |
-| `tracing.py` | Span tracing across pipeline stages |
+| `tracing.py` | Span tracing across pipeline stages (bounded in memory; `TRACE_PERSIST=1` also writes JSON files) |
 | `evaluation.py` | Faithfulness / relevance scoring |
 | `config.py` | All tunable settings in one place |
 | `static/index.html` | The web UI |
@@ -70,7 +147,7 @@ Everything is plain Python and easy to tweak. Here's where each piece lives:
 
 ## Tweak it
 
-Open **`config.py`** — that's where the knobs live:
+The engine's knobs are constants at the top of **`engine.py`** (`DIM`, `TOP_K`, `MMR_LAMBDA`, `GROUNDED_MIN_SCORE`, ...). The full-mode pipeline's live in **`config.py`**:
 
 - `TOP_K_RETRIEVAL`, `TOP_K_RERANK` — how many chunks to retrieve and keep
 - `CHUNK_SIZE`, `CHUNK_OVERLAP` — chunking granularity

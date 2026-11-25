@@ -25,6 +25,17 @@ jobs:
           python -c "import server; print('import OK')"
           python -c "import torch" 2>/dev/null && (echo 'ERROR: torch leaked into slim build' && exit 1) || echo 'no torch (correct)'
 
+      - name: Unit + HTTP tests (retrieval quality, cache, guardrails, compaction)
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Retrieval benchmark on the ground-truth corpus
+        run: python bench.py 500 1000
+
+      - name: 30-second soak (fails on any error or failed safety check)
+        run: python soak.py --duration 30 --docs 500 --interval 5 --out /tmp/soak
+
       - name: Boot server and hit demo endpoint
         run: |
           uvicorn server:app --host 127.0.0.1 --port 8000 &

@@ -1,0 +1,68 @@
+{
+  "duration_s": 3600.1,
+  "workers": 8,
+  "corpus_docs": 2000,
+  "corpus_chunks": 16714,
+  "requests": 1908763,
+  "queries": 1888598,
+  "avg_rps": 530.2,
+  "errors": 0,
+  "wrong_answers_to_safety_checks": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "p50": 13.488,
+    "p95": 29.35,
+    "p99": 39.114,
+    "p999": 61.504,
+    "max": 2223.8
+  },
+  "cache_hit_rate": 0.61,
+  "recall_at_5": 0.9923,
+  "answer_accuracy": 0.8194,
+  "quality_checked_queries": 1793345,
+  "injection_or_pii_blocked": 57046,
+  "offtopic_declined": 38207,
+  "reingests_during_run": 895,
+  "lora_finetunes_during_run": 79,
+  "index_compactions": 1,
+  "drift_first_vs_last_10pct": {
+    "rps": [
+      586.864,
+      426.125
+    ],
+    "p50_ms": [
+      12.456,
+      17.907
+    ],
+    "p99_ms": [
+      37.5,
+      47.108
+    ],
+    "rss_mb": [
+      205.086,
+      283.356
+    ],
+    "recall_at_5": [
+      0.995,
+      0.993
+    ]
+  },
+  "rss_mb_min_max": [
+    188.3,
+    300.7
+  ],
+  "server_totals": {
+    "requests": 1909150,
+    "queries": 1888623,
+    "errors": 0,
+    "cache_hits": 1152049,
+    "blocked": 57046,
+    "ungrounded": 122305
+  },
+  "sample_failures": [],
+  "host": {
+    "cpus": 4,
+    "python": "3.13.18"
+  },
+  "started_utc": "2026-11-25 07:41:56"
+}
